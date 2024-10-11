@@ -6,9 +6,13 @@ def add_potree(filepath, i):
     # 读取Potree文件并赋予evlr编号
     file = open(filepath, "rb")
     evlr_data = file.read()
-    user_id = "hierarchy"
+
+    index = filepath.find("./PoTree/")
+    result = filepath[index + len("./PoTree/"):]
+
+    user_id = result
     record_id = i
-    description = "the " + filepath + " of potree"
+    description = "the " + result + " of potree"
     evlr = VLR(user_id, record_id, description, evlr_data)
     file.close()
     return evlr
@@ -38,7 +42,7 @@ def main():
 
     # 读取原始las文件并转化版本
     las = laspy.read(filepath0)
-    header = las.header
+    # header = las.header
     # header.version = Version(1, 4)  # 1.4版本以上的las文件才支持扩展变长记录evlr
 
     # 添加evlr
@@ -48,5 +52,5 @@ def main():
     las.evlrs = evlrs
     las.header.evlrs = evlrs
     las.write("./Output/output_with_evlr.las")
-
+    
 main()
