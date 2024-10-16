@@ -1,7 +1,15 @@
 # Add_Potree_evlr_2_Las
+
 ## Introduction
 
 This project is created to add potree files/structures to the evlr of las files.
+
+***Add_evlr.py***  : add potree files to the evlr of las files.
+
+***Read_evlr.py*** : see if this addition is successful.
+
+***Analyze_evlr*** : get the point cloud data via octree.
+
 
 ## Preparation
 This project is written in Python. To run these codes, you need to install **laspy**.
@@ -12,10 +20,10 @@ or
 
 `<conda install -c conda-forge laspy>`
 
-## Steps
-1.Run ***Add_evlr.py*** to add potree files to the evlr of las files.
 
-2.Run ***Read_evlr.py*** to see if this addition is successful.
+## Steps
+Run ***main.py***
+
 
 ## Result
 The evlr part is succussfully added in the las file, and the las file is openable.
