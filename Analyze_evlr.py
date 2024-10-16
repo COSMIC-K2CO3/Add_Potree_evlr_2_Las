@@ -1,140 +1,468 @@
+import os 
 import json
 import laspy
 import struct
 import numpy as np
+from enum import Enum
+from typing import Callable
+from typing import List, Union
 
-def read_evlr(filepath):
-	# 打开包含 EVLR 的 LAS 文件
-	las_file = laspy.read(filepath)
+# def read_evlr(filepath):
+# 	# 打开包含 EVLR 的 LAS 文件
+# 	las_file = laspy.read(filepath)
 
-	# 提取 EVLR 数据，按照 record_id 区分 Potree 的三个文件
-	metadata_json = None
-	hierarchy_bin = None
-	octree_bin = None
+# 	# 提取 EVLR 数据，按照 record_id 区分 Potree 的三个文件
+# 	metadata_json = None
+# 	hierarchy_bin = None
+# 	octree_bin = None
 
-	for evlr in las_file.evlrs:
-		if evlr.record_id == 1:
-			hierarchy_bin = evlr.record_data  # hierarchy.bin
-		elif evlr.record_id == 2:
-			octree_bin = evlr.record_data  # octree.bin
-		elif evlr.record_id == 3:
-			metadata_json = evlr.record_data.decode('utf-8')  # metadata.json
+# 	for evlr in las_file.evlrs:
+# 		if evlr.record_id == 1:
+# 			hierarchy_bin = evlr.record_data  # hierarchy.bin
+# 		elif evlr.record_id == 2:
+# 			octree_bin = evlr.record_data  # octree.bin
+# 		elif evlr.record_id == 3:
+# 			metadata_json = evlr.record_data.decode('utf-8')  # metadata.json
 
-	# 验证是否成功提取
-	assert metadata_json is not None, "metadata.json 读取失败"
-	assert hierarchy_bin is not None, "hierarchy.bin 读取失败"
-	assert octree_bin is not None, "octree.bin 读取失败"
+# 	# 验证是否成功提取
+# 	assert metadata_json is not None, "metadata.json 读取失败"
+# 	assert hierarchy_bin is not None, "hierarchy.bin 读取失败"
+# 	assert octree_bin is not None, "octree.bin 读取失败"
 
-	return metadata_json, hierarchy_bin, octree_bin
+# 	return metadata_json, hierarchy_bin, octree_bin
 
-def parse_metadata(metadata_json):
-    metadata = json.loads(metadata_json)
-    bounding_box = metadata['boundingBox']  # 获取全局空间范围
-    scale = metadata['scale']  # 点云的尺度
-    offset = metadata['offset']  # 原点偏移
-    hierarchy_info = metadata['hierarchy']  # 获取层次信息
-    first_chunk_size = hierarchy_info['firstChunkSize']
-    step_size = hierarchy_info['stepSize']
-    depth = hierarchy_info['depth']
+class Attribute:
+    def __init__(self, name: str = "", description: str = "", size: int = 0,
+                 num_elements: int = 0, element_size: int = 0, attribute_type=None):
+        self.name = name
+        self.description = description
+        self.size = size
+        self.num_elements = num_elements
+        self.element_size = element_size
+        self.type = {"int8":np.int8,"int16":np.int16,"int32":np.int32,"int64":np.int64,"uint8":np.uint8,"uint16":np.uint16,
+                     "uint32":np.uint32,"uint64":np.uint64,"float":np.float32,"double":np.float64,}.get(attribute_type)
+        self.min = np.array([ np.inf,  np.inf,  np.inf])
+        self.max = np.array([-np.inf, -np.inf, -np.inf])
+        
+    def __repr__(self):
+        return str(self.__dict__)
+                
+class Attributes:
+    def __init__(self, attributes: List[Attribute] = None):
+        if attributes is None:
+            attributes = []
+        self.list = attributes
+        self.bytes = sum([attribute.size for attribute in attributes])
+        self.pos_scale = np.array([1.0, 1.0, 1.0])
+        self.pos_offset = np.array([0.0, 0.0, 0.0])
+
+    def add(self, attribute: Attribute):
+        self.list.append(attribute)
+        self.bytes += attribute.size
+
+    def get_offset(self, name: str) -> int:
+        offset = 0
+        for attribute in self.list:
+            if attribute.name == name:
+                return offset
+            offset += attribute.size
+        return -1
+
+    def get(self, name: str) -> Union[Attribute, None]:
+        for attribute in self.list:
+            if attribute.name == name:
+                return attribute
+        return None
     
-    return bounding_box, scale, offset, first_chunk_size, step_size, depth
+    def __repr__(self):
+        return str(self.list)
 
-class OctreeNode:
-    def __init__(self, offset, point_count):
-        self.offset = offset  # 在 octree.bin 中的偏移
-        self.point_count = point_count  # 节点中点的数量
-        self.children = [None] * 8  # 初始化为 8 个子节点
+class PotreePoints:
+    def __init__(self,metadata_json):
+        self.attributes = self.parse_attributes(metadata_json)
+        self.attribute_buffers_map = {}
+        self.num_points = 0
 
-def parse_hierarchy(hierarchy_bin, offset, depth, step_size):
-    node_offset, point_count = struct.unpack_from('<qI', hierarchy_bin, offset)
-    node = OctreeNode(node_offset, point_count)
-    offset += 12  # 每个节点的数据占 12 字节（8 字节的偏移量和 4 字节的点数）
+    def parse_attributes(self,metadata: dict) -> Attributes:
+        attribute_list = []
+        js_attributes = metadata["attributes"]
 
-    if depth > 0:
-        for i in range(8):  # 八叉树有 8 个子节点
-            child, offset = parse_hierarchy(hierarchy_bin, offset, depth - 1, step_size)
-            node.children[i] = child
+        for js_attribute in js_attributes:
+            name = js_attribute["name"]
+            description = js_attribute["description"]
+            size = js_attribute["size"]
+            num_elements = js_attribute["numElements"]
+            element_size = js_attribute["elementSize"]
+            attr_type = js_attribute["type"]
 
-    return node, offset
+            js_min = np.asarray(list(map(float,js_attribute["min"])))
+            js_max = np.asarray(list(map(float,js_attribute["max"])))
 
-def compute_child_bounds(parent_bounds, child_index, offset, scale):
-    # 根据子节点索引（0-7）和父节点边界划分子节点边界
-    center = [(min_b + max_b) / 2 for min_b, max_b in zip(parent_bounds['min'], parent_bounds['max'])]
+            attribute = Attribute(name=name, size=size, num_elements=num_elements, element_size=element_size, attribute_type=attr_type)
+
+            if len(js_min)<=3 and len(js_max)<=3:
+                attribute.min[:len(js_min)] = js_min
+                attribute.max[:len(js_max)] = js_max
+            attribute_list.append(attribute)
+
+        attributes = Attributes(attribute_list)
+        attributes.pos_scale = np.array(metadata["scale"])
+        attributes.pos_offset = np.array(metadata["offset"])
+
+        return attributes
+
+    def add_attribute_buffer(self, attribute: Attribute, buffer):
+        self.attribute_buffers_map[attribute.name] = buffer
+
+    def remove_attribute(self, attribute_name: str):
+        index = -1
+        for i, attribute in enumerate(self.attributes.list):
+            if attribute.name == attribute_name:
+                index = i
+                break
+        if index >= 0:
+            del self.attributes
+            del self.attribute_buffers_map[attribute_name]
+
+    def get_raw_data(self,key):
+        if key not in self.attribute_buffers_map.keys():
+            raise ValueError(f'no {key} data!')
+            # return None,None
+        buffer = self.attribute_buffers_map[key]
+        attr = self.attributes.get(key)
+        # print(attr.name,attr.type,attr.num_elements)
+        ps = np.frombuffer(buffer.data, dtype=attr.type, count=self.num_points*attr.num_elements)
+        return attr,ps.reshape(-1,attr.num_elements)
+
+    def get_position(self) -> np.ndarray:
+        attr,position = self.get_raw_data('position')
+        position = position * self.attributes.pos_scale + self.attributes.pos_offset
+        return position
     
-    child_min = list(parent_bounds['min'])
-    child_max = list(parent_bounds['max'])
+    def get_rgb(self) -> np.ndarray:
+        attr,rgb = self.get_raw_data('rgb')
+        return rgb /attr.max.max()
+    
+    def get_point_source_id(self) -> np.ndarray:
+        attr,ids = self.get_raw_data('point source id')
+        return ids
+    
+    def get_intensity(self) -> np.ndarray:
+        attr,intensity = self.get_raw_data('intensity')
+        return intensity /attr.max.max()
+        
+    def get_classification(self) -> np.ndarray:
+        attr,classification = self.get_raw_data('classification')
+        return classification
+    
+    def get_area(self):
+        ps = self.get_position()
+        return np.prod(ps.max(0)[:2] - ps.min(0)[:2])
+    
+    def get_volumn(self):
+        ps = self.get_position()
+        return np.prod(ps.max(0)[:3] - ps.min(0)[:3])    
+    
+    # try:
+    #     from PointCloud import PointCloud       
+    #     def get_pointcloud(self, rgb=False,intensity=False,classification=False,normals=False):#,row_column_index=False):     
+    #         xyz = self.get_position()
+    #         rgb = self.get_rgb() if rgb else None
+    #         intensity = self.get_intensity() if intensity else None
+    #         classification = self.get_classification() if classification else None
+    #         pcd = PointCloud(xyz,rgb=rgb,intensity=intensity,labels=classification)
+    #         if normals:pcd.estimate_normals()
+    #         return pcd            
+    # except Exception as e:
+    #     print(e,'no PointCloud module, def get_pointcloud(...) not available')
 
-    if child_index & 1:
-        child_min[0] = center[0]
-    else:
-        child_max[0] = center[0]
+class PotreeNode:    
+    class NodeType(Enum):
+        NORMAL = 0
+        LEAF = 1
+        PROXY = 2
 
-    if child_index & 2:
-        child_min[1] = center[1]
-    else:
-        child_max[1] = center[1]
+    class AABB:
+        def __init__(self, min_coords, max_coords):
+            self.min = np.asarray(min_coords)
+            self.max = np.asarray(max_coords)
+            
+        def __str__(self):
+            return str((self.min,self.max))
+        
+        def area(self):
+            return np.prod(self.max[:2] - self.min[:2])
+        
+        def volumn(self):
+            return np.prod(self.max - self.min)
 
-    if child_index & 4:
-        child_min[2] = center[2]
-    else:
-        child_max[2] = center[2]
+    def __init__(self, path='',name = '', aabb = None):
+        self.name = name
+        self.aabb = aabb
+        self.parent = None
+        self.children:list[PotreeNode] = [None] * 8
+        self.node_type = -1
+        self.byte_offset = 0
+        self.byte_size = 0
+        self.num_points = 0
+        self.path = path
+        
+    def __repr__(self):
+        return self.name#str(self.__dict__)
 
-    # 根据 metadata.json 中的 offset 和 scale 来修正边界
-    child_min = [c_min * s + o for c_min, s, o in zip(child_min, scale, offset)]
-    child_max = [c_max * s + o for c_max, s, o in zip(child_max, scale, offset)]
+    def level(self):
+        return len(self.name) - 1
 
-    return {'min': child_min, 'max': child_max}
+    def get_all_children(self):
+        nodes=[]
+        self.traverse(lambda node: nodes.append(node))
+        return nodes
 
-def is_node_in_bounds(node_bounds, query_bounds):
-    # 判断节点空间与查询的 BoundingBox 是否相交
-    return not (node_bounds['min'][0] > query_bounds['max'][0] or node_bounds['max'][0] < query_bounds['min'][0] or
-                node_bounds['min'][1] > query_bounds['max'][1] or node_bounds['max'][1] < query_bounds['min'][1] or
-                node_bounds['min'][2] > query_bounds['max'][2] or node_bounds['max'][2] < query_bounds['min'][2])
+    def read_all_children_nodes(self):
+        nodes:list[PotreeNode]=self.get_all_children()
+        pp = [n.read_node() for n in nodes]
+        return pp
 
-def load_point_data(node, octree_bin):
-    points = []
-    for i in range(node.point_count):
-        point_offset = node.offset + i * 16  # 假设每个点占 16 字节（xyz + 其他属性）
-        point = struct.unpack_from('<fff', octree_bin, point_offset)  # 假设每个点有3个float类型的坐标
-        points.append(point)
-    return points
+    def traverse(self, callback: Callable[['PotreeNode'], None]):
+        callback(self)
+        for child in self.children:
+            if child is not None:
+                child.traverse(callback)
 
-def traverse_and_load_points(node, node_bounds, query_bounds, octree_bin, points, scale, offset):
-    if not is_node_in_bounds(node_bounds, query_bounds):
-        return
+    def write_node(self,data_dict:dict):#{'classification':np.ones(n0.num_points,dtype=np.uint8)})
+        tmpp = self
+        while tmpp.path == '':
+            tmpp = tmpp.parent
+        potree_path = tmpp.path
 
-    # 加载当前节点的数据
-    points.extend(load_point_data(node, octree_bin))
+        las_file = laspy.read(potree_path)
 
-    # 递归遍历子节点
-    for child_index, child in enumerate(node.children):
-        if child is not None:
-            child_bounds = compute_child_bounds(node_bounds, child_index, offset, scale)
-            traverse_and_load_points(child, child_bounds, query_bounds, octree_bin, points, scale, offset)
+        attributes_json = None
+        octree_bin = None
 
-def optimize_las_read(filepath, query_bounds):
-    # 读取并解析 EVLR 数据
-    metadata_json, hierarchy_bin, octree_bin = read_evlr(filepath)
+        for evlr in las_file.evlrs:
+            if evlr.record_id == 3:
+                attributes_json = json.loads(evlr.record_data.decode('utf-8'))  # metadata.json
+            
+        points = PotreePoints(attributes_json)
+        points.num_points = self.num_points
 
-    # 解析 metadata.json
-    bounding_box, scale, offset, first_chunk_size, step_size, depth = parse_metadata(metadata_json)
-    #query_bounds = bounding_box
+        for evlr in las_file.evlrs:
+            if evlr.record_id == 2:
+                octree_bin = evlr.record_data  # octree.bin
+                is_brotli_encoded = (attributes_json["encoding"] == "BROTLI")
+                if is_brotli_encoded:
+                    raise ValueError('brotli encoded is not support!')
+                else:
+                    attribute_offset = 0
+                    for attribute in points.attributes.list:
+                        attribute_data_size = attribute.size * self.num_points
+                        offset_target = 0
+                        if attribute.name in data_dict.keys():
+                            data:np.ndarray = data_dict[attribute.name]
+                            if len(data.flatten().tobytes())!=attribute_data_size:
+                                raise ValueError(f'data size:{data.shape} is not in right bytes!(attribute.size:{attribute.size} , num_points:{self.num_points})')
+                            for i in range(points.num_points):
+                                base_offset = i * points.attributes.bytes + attribute_offset
+                                octree_bin.seek(self.byte_offset + base_offset)
+                                octree_bin.write(data[i].tobytes())
+                                offset_target += attribute.size
+                        attribute_offset += attribute.size
+    
+    def write_uniform_classification(self, lable=0):
+        return self.write_node({'classification':np.ones(self.num_points,dtype=np.uint8)*lable})
+                        
+    def write_classification(self, data):
+        return self.write_node({'classification':data})
+    
+    def write_uniform_rgb(self, color=(0,0,0)):# 0.0 ~ 1.0
+        data = np.ones((self.num_points,3),dtype=np.uint16)
+        data[:,0] = int(color[0] * np.iinfo(np.uint16).max)
+        data[:,1] = int(color[1] * np.iinfo(np.uint16).max)
+        data[:,2] = int(color[2] * np.iinfo(np.uint16).max)
+        return self.write_node({'rgb':data})
+    
+    def write_rgb(self, data):
+        return self.write_node({'rgb':data})
 
-    # 解析 hierarchy.bin，构建八叉树
-    root_node, _ = parse_hierarchy(hierarchy_bin, 0, depth, step_size)
+    def read_node(self):     
+        tmpp = self
+        while tmpp.path == '':
+            tmpp = tmpp.parent
+        potree_path = tmpp.path
+        las_file = laspy.read(potree_path)
+        for evlr in las_file.evlrs:
+            if evlr.record_id == 3:
+                attributes_json = json.loads(evlr.record_data.decode('utf-8'))
+            
+        points = PotreePoints(attributes_json)
+        points.num_points = self.num_points
 
-    # 准备存储点数据
-    points = []
+        for evlr in las_file.evlrs:
+            if evlr.record_id == 2:
+                #file = evlr.record_data
+                #file.seek(self.byte_offset)
+                #data = file.read(self.byte_size)
+                data = evlr.record_data
 
-    # 递归选择八叉树节点，并加载数据
-    traverse_and_load_points(root_node, bounding_box, query_bounds, octree_bin, points, scale, offset)
+        is_brotli_encoded = (attributes_json["encoding"] == "BROTLI")
+        if is_brotli_encoded:
+            raise ValueError('brotli encoded is not support!')
 
-    return points
+        else:
+            attribute_offset = 0
+            for attribute in points.attributes.list:
+                attribute_data_size = attribute.size * self.num_points
+                buffer = np.empty(attribute_data_size, dtype=np.uint8)
+                offset_target = 0
+                for i in range(points.num_points):
+                    base_offset = i * points.attributes.bytes + attribute_offset
+                    raw = data[ base_offset : base_offset + attribute.size]
+                    buffer[offset_target:offset_target + attribute.size] = np.frombuffer(raw, dtype=np.uint8)
+                    offset_target += attribute.size
 
-def main():
-	filepath = "./Output/output_with_evlr.las"
-	query_bounds = {'min': [-100, -100, -100], 'max': [100, 100, 100]}  # 示例查询范围
-	points = optimize_las_read(filepath, query_bounds)
-	print(f"Number of points in the query bounds: {len(points)}")
+                points.add_attribute_buffer(attribute, buffer)
+                attribute_offset += attribute.size
 
-main()
+        return points
+
+class Potree:
+    def __init__(self, path=None):
+        print(os.path)
+        assert os.path.isfile(path)
+
+        self.root = None
+        self.nodes = []
+        self.path = path
+        if path is not None:
+            self.load()
+    
+    def load_hierarchy_recursive(self, root: PotreeNode, data: bytes, offset: int, size: int):
+        bytesPerNode = 22
+        numNodes = size // bytesPerNode
+
+        nodes = [root]
+
+        for i in range(numNodes):
+            current = nodes[i]
+
+            offsetNode = offset + i * bytesPerNode
+            type, childMask, numPoints, byteOffset, byteSize = struct.unpack_from('<BBIqq', buffer=data, offset=offsetNode)
+
+            current.byte_offset = byteOffset
+            current.byte_size = byteSize
+            current.num_points = numPoints
+            current.node_type = type
+
+            if current.node_type == PotreeNode.NodeType.PROXY.value:
+                self.load_hierarchy_recursive(current, data, byteOffset, byteSize)
+            else:
+                for childIndex in range(8):
+                    childExists = ((1 << childIndex) & childMask) != 0
+
+                    if not childExists:
+                        continue
+
+                    childName = current.name + str(childIndex)
+
+                    child = PotreeNode(name=childName, aabb=self.child_AABB(current.aabb, childIndex))
+                    current.children[childIndex] = child
+                    child.parent = current
+
+                    nodes.append(child)
+
+    def child_AABB(self, aabb:PotreeNode.AABB, index):
+        min_coords,max_coords = aabb.min.copy(),aabb.max.copy()
+        size = [max_coord - min_coord for max_coord, min_coord in zip(aabb.max, aabb.min)]
+        min_coords[2] += ( size[2] / 2 if (index & 0b0001) > 0 else -(size[2] / 2) )
+        min_coords[1] += ( size[1] / 2 if (index & 0b0010) > 0 else -(size[1] / 2) )
+        min_coords[0] += ( size[0] / 2 if (index & 0b0100) > 0 else -(size[0] / 2) )
+        return PotreeNode.AABB(min_coords, max_coords)
+
+    def load(self, path=None):
+        if self.path is not None:path = self.path        
+        assert self.path is not None or path is not None
+
+        # 打开包含 EVLR 的 LAS 文件
+        las_file = laspy.read(path)
+
+        # 提取 EVLR 数据，按照 record_id 区分 Potree 的三个文件
+        metadata = None
+        data = None
+
+        for evlr in las_file.evlrs:
+            if evlr.record_id == 1:
+                data = evlr.record_data  # hierarchy.bin
+            elif evlr.record_id == 3:
+                metadata = json.loads(evlr.record_data.decode('utf-8'))  # metadata.json
+
+        jsHierarchy = metadata["hierarchy"]
+        firstChunkSize = jsHierarchy["firstChunkSize"]
+        # stepSize = jsHierarchy["stepSize"]
+        # depth = jsHierarchy["depth"]
+
+        aabb = PotreeNode.AABB(metadata["boundingBox"]["min"],metadata["boundingBox"]["max"])
+        self.root = PotreeNode(path, name="r", aabb=aabb)
+        self.load_hierarchy_recursive(self.root, data, offset = 0, size = firstChunkSize)
+        self.nodes = []
+        self.root.traverse(lambda node: self.nodes.append(node))
+        return self
+
+    def bfs(self,node=[],depth=0,resdict={}):
+        node:list[PotreeNode] = list(filter(lambda x: x is not None, node))
+        if len(node)==0:return
+        res = []
+        resdict[depth] = node
+        for i in resdict[depth]:
+            i:PotreeNode=i
+            res += i.children
+        self.bfs(res,depth+1,resdict)
+    
+    def get_nodes_LOD_dict(self)->dict[int,PotreeNode]:
+        res = {}
+        self.bfs([self.root],0,res)
+        return res
+        
+    def get_max_LOD(self):
+        return max(self.get_nodes_LOD_dict().keys())
+    
+    def get_nodes_by_LOD(self, lod=0)->list[PotreeNode]:
+        assert type(lod) == int, 'nodes key must be int!'
+        return self.get_nodes_LOD_dict().get(lod,[])
+    
+    # def _potree_read_node(self,x:PotreePoints):
+    #     return x.read_node()
+
+    def get_point_size_by_LOD(self,lod=0):
+        return sum([n.num_points for n in self.get_nodes_by_LOD(lod)])
+
+    def get_data_by_LOD(self,data_name:list[str]=['position'],lod=0):        
+        # multiproc=False
+        res = []
+        nodes = self.get_nodes_by_LOD(lod)
+        # print('read points :',sum([n.num_points for n in nodes]))         
+        if len(nodes)==0:return res
+        # with multiprocessing.Pool(multiprocessing.cpu_count()) as pool:       
+            # (pool.map(self._potree_read_node, nodes) if multiproc else 
+        nodes = [n.read_node() for n in nodes]
+        method_list = [func for func in dir(PotreePoints) if callable(getattr(PotreePoints, func))]
+        for name in data_name:
+            name = name.replace(' ', '_')
+            if 'get_'+name in method_list:
+                ps = [getattr(n, 'get_'+name)() for n in nodes]
+                res.append(np.vstack(ps))    
+            else:
+                raise ('no function get_'+name)
+        return res
+    
+    def get_position_by_LOD(self, lod=0):
+        res = self.get_data_by_LOD(data_name=['position'],lod=lod)
+        return res[0]
+    
+    def get_rgb_by_LOD(self, lod=0):
+        res = self.get_data_by_LOD(data_name=['rgb'],lod=lod)
+        return res[0]
+    
+    def get_intensity_by_LOD(self, lod=0):
+        res = self.get_data_by_LOD(data_name=['intensity'],lod=lod)
+        return res[0]
