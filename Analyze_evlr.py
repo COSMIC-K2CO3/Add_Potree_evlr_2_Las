@@ -7,30 +7,6 @@ from enum import Enum
 from typing import Callable
 from typing import List, Union
 
-# def read_evlr(filepath):
-# 	# 打开包含 EVLR 的 LAS 文件
-# 	las_file = laspy.read(filepath)
-
-# 	# 提取 EVLR 数据，按照 record_id 区分 Potree 的三个文件
-# 	metadata_json = None
-# 	hierarchy_bin = None
-# 	octree_bin = None
-
-# 	for evlr in las_file.evlrs:
-# 		if evlr.record_id == 1:
-# 			hierarchy_bin = evlr.record_data  # hierarchy.bin
-# 		elif evlr.record_id == 2:
-# 			octree_bin = evlr.record_data  # octree.bin
-# 		elif evlr.record_id == 3:
-# 			metadata_json = evlr.record_data.decode('utf-8')  # metadata.json
-
-# 	# 验证是否成功提取
-# 	assert metadata_json is not None, "metadata.json 读取失败"
-# 	assert hierarchy_bin is not None, "hierarchy.bin 读取失败"
-# 	assert octree_bin is not None, "octree.bin 读取失败"
-
-# 	return metadata_json, hierarchy_bin, octree_bin
-
 class Attribute:
     def __init__(self, name: str = "", description: str = "", size: int = 0,
                  num_elements: int = 0, element_size: int = 0, attribute_type=None):
@@ -98,8 +74,10 @@ class PotreePoints:
             js_min = np.asarray(list(map(float,js_attribute["min"])))
             js_max = np.asarray(list(map(float,js_attribute["max"])))
 
+            # 创建属性对象
             attribute = Attribute(name=name, size=size, num_elements=num_elements, element_size=element_size, attribute_type=attr_type)
 
+            # 设置属性的最小值和最大值，如果长度小于3，则赋值
             if len(js_min)<=3 and len(js_max)<=3:
                 attribute.min[:len(js_min)] = js_min
                 attribute.max[:len(js_max)] = js_max
@@ -162,41 +140,28 @@ class PotreePoints:
     def get_volumn(self):
         ps = self.get_position()
         return np.prod(ps.max(0)[:3] - ps.min(0)[:3])    
-    
-    # try:
-    #     from PointCloud import PointCloud       
-    #     def get_pointcloud(self, rgb=False,intensity=False,classification=False,normals=False):#,row_column_index=False):     
-    #         xyz = self.get_position()
-    #         rgb = self.get_rgb() if rgb else None
-    #         intensity = self.get_intensity() if intensity else None
-    #         classification = self.get_classification() if classification else None
-    #         pcd = PointCloud(xyz,rgb=rgb,intensity=intensity,labels=classification)
-    #         if normals:pcd.estimate_normals()
-    #         return pcd            
-    # except Exception as e:
-    #     print(e,'no PointCloud module, def get_pointcloud(...) not available')
 
 class PotreeNode:    
     class NodeType(Enum):
-        NORMAL = 0
-        LEAF = 1
-        PROXY = 2
+        NORMAL = 0  # 普通节点
+        LEAF = 1    # 叶子节点
+        PROXY = 2   # 代理节点
 
-    class AABB:
+    class AABB: # Axis Aligned Bounding Box, 轴对齐的边界框
         def __init__(self, min_coords, max_coords):
             self.min = np.asarray(min_coords)
             self.max = np.asarray(max_coords)
             
         def __str__(self):
-            return str((self.min,self.max))
+            return str((self.min,self.max)) # 当用print输出时，输出的是这个
         
         def area(self):
-            return np.prod(self.max[:2] - self.min[:2])
+            return np.prod(self.max[:2] - self.min[:2]) # 面积
         
         def volumn(self):
-            return np.prod(self.max - self.min)
+            return np.prod(self.max - self.min) # 体积
 
-    def __init__(self, path='',name = '', aabb = None):
+    def __init__(self, path='', name = '', aabb = None):
         self.name = name
         self.aabb = aabb
         self.parent = None
@@ -223,7 +188,7 @@ class PotreeNode:
         pp = [n.read_node() for n in nodes]
         return pp
 
-    def traverse(self, callback: Callable[['PotreeNode'], None]):
+    def traverse(self, callback: Callable[['PotreeNode'], None]):   # 递归遍历树（深度优先）, Callable用于检查对象是否可调用, callback不返回值
         callback(self)
         for child in self.children:
             if child is not None:
@@ -305,7 +270,7 @@ class PotreeNode:
                 #data = file.read(self.byte_size)
                 data = evlr.record_data
 
-        is_brotli_encoded = (attributes_json["encoding"] == "BROTLI")
+        is_brotli_encoded = (attributes_json["encoding"] == "BROTLI")   # 检查编码格式
         if is_brotli_encoded:
             raise ValueError('brotli encoded is not support!')
 
@@ -313,15 +278,15 @@ class PotreeNode:
             attribute_offset = 0
             for attribute in points.attributes.list:
                 attribute_data_size = attribute.size * self.num_points
-                buffer = np.empty(attribute_data_size, dtype=np.uint8)
+                buffer = np.empty(attribute_data_size, dtype=np.uint8) # 创建一个空的字节数组
                 offset_target = 0
                 for i in range(points.num_points):
-                    base_offset = i * points.attributes.bytes + attribute_offset
-                    raw = data[ base_offset : base_offset + attribute.size]
-                    buffer[offset_target:offset_target + attribute.size] = np.frombuffer(raw, dtype=np.uint8)
+                    base_offset = i * points.attributes.bytes + attribute_offset    # 计算当前点在octree_bin中的偏移量
+                    raw = data[ base_offset : base_offset + attribute.size]         # 从data中读取当前点在octree_bin中的数据
+                    buffer[offset_target:offset_target + attribute.size] = np.frombuffer(raw, dtype=np.uint8)   # 将读取的数据转换为np.uint8类型并存储到buffer中
                     offset_target += attribute.size
 
-                points.add_attribute_buffer(attribute, buffer)
+                points.add_attribute_buffer(attribute, buffer)  # 将buffer添加到points中
                 attribute_offset += attribute.size
 
         return points
@@ -329,7 +294,7 @@ class PotreeNode:
 class Potree:
     def __init__(self, path=None):
         print(os.path)
-        assert os.path.isfile(path)
+        assert os.path.isfile(path) # 断言文件存在
 
         self.root = None
         self.nodes = []
@@ -338,38 +303,38 @@ class Potree:
             self.load()
     
     def load_hierarchy_recursive(self, root: PotreeNode, data: bytes, offset: int, size: int):
-        bytesPerNode = 22
+        bytesPerNode = 22   # 每个节点的字节数
         numNodes = size // bytesPerNode
 
-        nodes = [root]
+        nodes = [root]  # 初始化节点列表，包含根节点
 
         for i in range(numNodes):
             current = nodes[i]
 
-            offsetNode = offset + i * bytesPerNode
-            type, childMask, numPoints, byteOffset, byteSize = struct.unpack_from('<BBIqq', buffer=data, offset=offsetNode)
+            offsetNode = offset + i * bytesPerNode  # 计算当前节点的偏移量
+            type, childMask, numPoints, byteOffset, byteSize = struct.unpack_from('<BBIqq', buffer=data, offset=offsetNode) # 格式:unsigned char, unsigned char, unsigned int, unsigned long long, unsigned long long, 可读的缓冲区字对象data(即hierarchy.bin)用于提取数据, 从何处开始读取数据
 
             current.byte_offset = byteOffset
             current.byte_size = byteSize
             current.num_points = numPoints
             current.node_type = type
 
-            if current.node_type == PotreeNode.NodeType.PROXY.value:
-                self.load_hierarchy_recursive(current, data, byteOffset, byteSize)
+            if current.node_type == PotreeNode.NodeType.PROXY.value:    # 如果节点类型为代理节点
+                self.load_hierarchy_recursive(current, data, byteOffset, byteSize)  # 递归加载子节点
             else:
-                for childIndex in range(8):
+                for childIndex in range(8): # 遍历子节点，检查是否存在
                     childExists = ((1 << childIndex) & childMask) != 0
 
                     if not childExists:
                         continue
 
-                    childName = current.name + str(childIndex)
+                    childName = current.name + str(childIndex)  # 若存在，则创建子节点对象，并设置属性
 
                     child = PotreeNode(name=childName, aabb=self.child_AABB(current.aabb, childIndex))
                     current.children[childIndex] = child
                     child.parent = current
 
-                    nodes.append(child)
+                    nodes.append(child) # 将子节点添加到节点列表中
 
     def child_AABB(self, aabb:PotreeNode.AABB, index):
         min_coords,max_coords = aabb.min.copy(),aabb.max.copy()
@@ -402,21 +367,21 @@ class Potree:
         # depth = jsHierarchy["depth"]
 
         aabb = PotreeNode.AABB(metadata["boundingBox"]["min"],metadata["boundingBox"]["max"])
-        self.root = PotreeNode(path, name="r", aabb=aabb)
+        self.root = PotreeNode(path, name="r", aabb=aabb)   # 初始化根节点
         self.load_hierarchy_recursive(self.root, data, offset = 0, size = firstChunkSize)
         self.nodes = []
-        self.root.traverse(lambda node: self.nodes.append(node))
+        self.root.traverse(lambda node: self.nodes.append(node))    # 遍历所有节点，将节点添加到 nodes 列表中
         return self
 
-    def bfs(self,node=[],depth=0,resdict={}):
-        node:list[PotreeNode] = list(filter(lambda x: x is not None, node))
-        if len(node)==0:return
-        res = []
-        resdict[depth] = node
+    def bfs(self,node=[],depth=0,resdict={}):   # 广度优先搜索，节点列表，深度，每层字典
+        node:list[PotreeNode] = list(filter(lambda x: x is not None, node)) # 过滤掉 None 值，确保节点列表中只包含非 None 值
+        if len(node)==0:return  # 如果节点列表为空，则遍历完，返回
+        res = []    # 列表用于存储下一层的节点
+        resdict[depth] = node   # 将当前层的节点存储到字典中，键为深度
         for i in resdict[depth]:
             i:PotreeNode=i
-            res += i.children
-        self.bfs(res,depth+1,resdict)
+            res += i.children   # 将当前层的节点的子节点添加到下一层节点列表中
+        self.bfs(res,depth+1,resdict)   # 递归调用，遍历下一层节点
     
     def get_nodes_LOD_dict(self)->dict[int,PotreeNode]:
         res = {}
@@ -429,28 +394,23 @@ class Potree:
     def get_nodes_by_LOD(self, lod=0)->list[PotreeNode]:
         assert type(lod) == int, 'nodes key must be int!'
         return self.get_nodes_LOD_dict().get(lod,[])
-    
-    # def _potree_read_node(self,x:PotreePoints):
-    #     return x.read_node()
 
     def get_point_size_by_LOD(self,lod=0):
         return sum([n.num_points for n in self.get_nodes_by_LOD(lod)])
 
     def get_data_by_LOD(self,data_name:list[str]=['position'],lod=0):        
-        # multiproc=False
         res = []
-        nodes = self.get_nodes_by_LOD(lod)
-        # print('read points :',sum([n.num_points for n in nodes]))         
-        if len(nodes)==0:return res
-        # with multiprocessing.Pool(multiprocessing.cpu_count()) as pool:       
-            # (pool.map(self._potree_read_node, nodes) if multiproc else 
-        nodes = [n.read_node() for n in nodes]
-        method_list = [func for func in dir(PotreePoints) if callable(getattr(PotreePoints, func))]
+        nodes = self.get_nodes_by_LOD(lod)  # 获取节点列表
+        print('read points :',sum([n.num_points for n in nodes]))    # 打印节点列表中所有节点的点数总和
+        if len(nodes)==0:return res # 如果节点列表为空，则返回空列表
+
+        nodes = [n.read_node() for n in nodes]  # 读取节点的数据，更新节点列表
+        method_list = [func for func in dir(PotreePoints) if callable(getattr(PotreePoints, func))] # 获取 PotreePoints 类中所有可调用的方法列表
         for name in data_name:
-            name = name.replace(' ', '_')
-            if 'get_'+name in method_list:
-                ps = [getattr(n, 'get_'+name)() for n in nodes]
-                res.append(np.vstack(ps))    
+            name = name.replace(' ', '_')   # 将空格替换为下划线
+            if 'get_'+name in method_list:  # 检查方法列表中是否存在 'get_'+name 方法
+                ps = [getattr(n, 'get_'+name)() for n in nodes] # 对节点调用 'get_'+name 方法并存储结果于 ps 列表中
+                res.append(np.vstack(ps))   # 将ps列表中的所有数组垂直堆叠成一个数组，添加进结果列表中
             else:
                 raise ('no function get_'+name)
         return res
