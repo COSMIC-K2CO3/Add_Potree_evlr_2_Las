@@ -8,7 +8,7 @@ This project is created to add potree files/structures to the evlr of las files.
 
 ***Read_evlr.py*** : see if this addition is successful.
 
-***Analyze_evlr*** : get the point cloud data via octree.
+***Analyze_evlr.py*** : get the point cloud data via octree.
 
 
 ## Preparation
